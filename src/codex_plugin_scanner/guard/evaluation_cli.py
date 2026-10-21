@@ -1,16 +1,15 @@
 """Bounded command line stages for local evaluation records.
 
-The evaluator CLI is deliberately a staging surface.  It validates a declared
+The evaluator CLI is deliberately a preparation surface.  It validates a declared
 profile, optionally allocates the private setup owned by the existing
-preflight module, packages validated records, and verifies an evidence
-archive's canonical bytes.  It does not run evaluation scenarios or produce
-installed-host proof.
+preflight module, runs fixed synthetic adapter cases, packages validated
+records, and verifies an evidence archive's canonical bytes.  The synthetic
+runner does not produce installed-host proof.
 """
 
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 from collections.abc import Mapping, Sequence
@@ -24,8 +23,9 @@ from .evaluation_cli_recovery import (
     _read_recovery_token,
     _recovery_token_path,
     _remove_recovery_token,
-    _write_recovery_token,
 )
+from .evaluation_cli_recovery import _write_recovery_token as _write_recovery_token
+from .evaluation_cli_run import run_synthetic_command
 from .evaluation_contracts import EvaluationContractError, EvaluationProfile, EvaluationResult
 from .evaluation_evidence_package import (
     EVALUATION_PROOF_BOUNDARY,
@@ -34,11 +34,10 @@ from .evaluation_evidence_package import (
     write_evaluation_evidence_package,
 )
 from .evaluation_json import reject_duplicate_keys
-from .evaluation_preflight import (
-    cleanup_interrupted_evaluation_setup,
-    preflight_evaluation,
-    setup_evaluation,
-)
+from .evaluation_preflight import cleanup_interrupted_evaluation_setup
+from .evaluation_preflight import preflight_evaluation as preflight_evaluation
+from .evaluation_preflight import setup_evaluation as setup_evaluation
+from .evaluation_runner import BUILT_IN_CASE_IDS
 
 CLI_SCHEMA_VERSION = "guard.evaluation-cli.v1"
 _MAX_PROFILE_BYTES = 1 * 1024 * 1024
@@ -65,6 +64,7 @@ def _result(
     manifest: Mapping[str, object] | None = None,
     package: Mapping[str, object] | None = None,
     cleanup: Mapping[str, object] | None = None,
+    run: Mapping[str, object] | None = None,
     error: _CliError | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
@@ -80,6 +80,8 @@ def _result(
         payload["package"] = dict(package)
     if cleanup is not None:
         payload["cleanup"] = dict(cleanup)
+    if run is not None:
+        payload["run"] = dict(run)
     if error is not None:
         payload["error"] = _error_payload(error)
     return payload
@@ -197,51 +199,34 @@ def _artifact_paths(specs: Sequence[str], profile: EvaluationProfile) -> dict[st
 
 
 def _run_preflight(args: argparse.Namespace) -> int:
+    from .evaluation_cli_setup import run_preflight
+
+    return run_preflight(args)
+
+
+def _run_synthetic(args: argparse.Namespace) -> int:
+    """Run fixed local adapters while keeping recovery outside the setup root."""
+
+    if os.name == "nt":
+        error = _CliError(
+            "recovery_windows_unavailable",
+            "private recovery token storage is unavailable on Windows",
+            status="blocked_environment",
+        )
+        _emit(_result("run", error.status, error=error))
+        return _exit_code(error.status)
     try:
         profile_path = _path_argument(
             args, "profile_path", "profile_option", "evaluation profile", code="profile_argument_required"
         )
         profile = _load_profile(profile_path)
-        artifacts = _artifact_paths(cast(list[str], args.artifact), profile)
-        if args.setup:
-            if os.name == "nt":
-                raise _CliError(
-                    "recovery_windows_unavailable",
-                    "private recovery token storage is unavailable on Windows",
-                    status="blocked_environment",
-                )
-            setup = setup_evaluation(
-                profile,
-                host_executable=args.host_executable,
-                artifact_paths=artifacts or None,
-                allow_host_execution=bool(args.allow_host_execution),
-            )
-            report = setup.to_dict()
-            cleanup: dict[str, object] | None = None
-            if setup.report.status == "passed":
-                try:
-                    target_scope = cast(Mapping[str, object], profile.data["targetScope"])
-                    declared_parent = Path(cast(str, target_scope["rootPath"]))
-                    _write_recovery_token(setup, declared_parent=declared_parent)
-                except _CliError as error:
-                    with contextlib.suppress(EvaluationContractError):
-                        setup.cleanup()
-                    _emit(_result("preflight", error.status, report=report, error=error))
-                    return _exit_code(error.status)
-                cleanup = {"available": True, "tokenLocation": "declared_parent"}
-            _emit(_result("preflight", setup.report.status, report=report, cleanup=cleanup))
-            return _exit_code(setup.report.status)
-        report = preflight_evaluation(
-            profile,
-            host_executable=args.host_executable,
-            artifact_paths=artifacts or None,
-            allow_host_execution=bool(args.allow_host_execution),
-        )
-        _emit(_result("preflight", report.status, report=report.to_dict()))
-        return _exit_code(report.status)
+        requested = tuple(cast(list[str], args.case)) if args.case else None
+        result = run_synthetic_command(profile, requested)
     except _CliError as error:
-        _emit(_result("preflight", error.status, error=error))
+        _emit(_result("run", error.status, error=error))
         return _exit_code(error.status)
+    _emit(_result("run", result.status, run=result.run, cleanup=result.cleanup, error=result.error))
+    return _exit_code(result.status)
 
 
 def _run_verify_evidence(args: argparse.Namespace) -> int:
@@ -360,11 +345,11 @@ def _run_cleanup(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the standalone staged evaluation parser."""
+    """Build the bounded evaluation parser."""
 
     parser = _EvaluationArgumentParser(
         prog="hol-guard-eval",
-        description="Validate bounded local evaluation stages without running scenarios.",
+        description="Validate bounded local evaluation stages and fixed synthetic adapters.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(
@@ -396,6 +381,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--setup",
         action="store_true",
         help="allocate an owned setup after a passed preflight and retain a private cleanup token",
+    )
+
+    run = subparsers.add_parser(
+        "run",
+        help="run built-in disposable shell/file and loopback synthetic adapters",
+    )
+    run.add_argument("profile_path", nargs="?", help="evaluation profile JSON path")
+    run.add_argument("--profile", dest="profile_option", help="evaluation profile JSON path")
+    run.add_argument(
+        "--case",
+        action="append",
+        choices=BUILT_IN_CASE_IDS,
+        default=[],
+        help="built-in case ID; repeat only to cover the profile capabilities",
     )
 
     verify_evidence = subparsers.add_parser(
@@ -440,6 +439,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(exc.code) if isinstance(exc.code, int) else 2
     if args.command == "preflight":
         return _run_preflight(args)
+    if args.command == "run":
+        return _run_synthetic(args)
     if args.command == "verify-evidence":
         return _run_verify_evidence(args)
     if args.command == "package-evidence":

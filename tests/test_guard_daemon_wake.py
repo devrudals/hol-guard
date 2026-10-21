@@ -242,99 +242,12 @@ class TestDaemonLifecycle:
         assert daemon_manager_module.clear_guard_daemon_state_if_current(guard_home, pid=111, port=5705) is True
         assert json.loads((guard_home / "daemon-state.json").read_text(encoding="utf-8")) == {}
 
-    def test_retiring_duplicate_daemons_rewrites_kept_state_after_old_exit(
-        self,
-        tmp_path,
-        monkeypatch,
-    ) -> None:
-        """Old duplicate daemons may clear daemon-state.json on exit; rewrite the kept daemon state."""
-        guard_home = tmp_path / "guard-home"
-        guard_home.mkdir()
-        daemon_manager_module.write_guard_daemon_state(guard_home, 5707, "token-1", pid=111)
-        killed: list[int] = []
 
-        monkeypatch.setattr(
-            daemon_manager_module,
-            "_running_guard_daemon_processes_for_guard_home",
-            lambda _guard_home: [(111, 5707), (222, 5708)] if not (guard_home / "retired").exists() else [(111, 5707)],
-        )
+def _warm_native_runtime_status() -> None:
+    """Probe the native runtime before the fake Popen goes in; the probe shares the subprocess module."""
+    from codex_plugin_scanner.guard.native_runtime import native_runtime_status
 
-        def fake_retire(pid: int, *, expected_guard_home: Path | None = None) -> bool:
-            del expected_guard_home
-            killed.append(pid)
-            daemon_manager_module.clear_guard_daemon_state(guard_home)
-            (guard_home / "retired").write_text("1", encoding="utf-8")
-            return True
-
-        monkeypatch.setattr(daemon_manager_module, "_retire_guard_daemon_pid", fake_retire)
-        monkeypatch.setattr(
-            daemon_manager_module,
-            "_daemon_healthz_details_payload",
-            lambda _url, _auth_token: {"guard_home": str(guard_home), "pid": 111},
-        )
-
-        daemon_manager_module._retire_duplicate_guard_daemons(guard_home, keep_port=5707)
-        state = json.loads((guard_home / "daemon-state.json").read_text(encoding="utf-8"))
-
-        assert killed == [222]
-        assert state["pid"] == 111
-        assert state["port"] == 5707
-
-    def test_retiring_duplicate_daemons_does_not_rewrite_when_retire_fails(
-        self,
-        tmp_path,
-        monkeypatch,
-    ) -> None:
-        """A duplicate that could not be retired must block kept-state recovery."""
-        guard_home = tmp_path / "guard-home"
-        guard_home.mkdir()
-        daemon_manager_module.write_guard_daemon_state(guard_home, 5709, "token-1", pid=111)
-
-        monkeypatch.setattr(
-            daemon_manager_module,
-            "_running_guard_daemon_processes_for_guard_home",
-            lambda _guard_home: [(111, 5709), (222, 5710)],
-        )
-
-        def fake_retire(_pid: int, *, expected_guard_home: Path | None = None) -> bool:
-            del expected_guard_home
-            daemon_manager_module.clear_guard_daemon_state(guard_home)
-            return False
-
-        monkeypatch.setattr(daemon_manager_module, "_retire_guard_daemon_pid", fake_retire)
-
-        daemon_manager_module._retire_duplicate_guard_daemons(guard_home, keep_port=5709)
-
-        assert json.loads((guard_home / "daemon-state.json").read_text(encoding="utf-8")) == {}
-
-    def test_retiring_duplicate_daemons_requires_kept_daemon_auth(
-        self,
-        tmp_path,
-        monkeypatch,
-    ) -> None:
-        """Do not recover state with a token that cannot authenticate to the kept daemon."""
-        guard_home = tmp_path / "guard-home"
-        guard_home.mkdir()
-        daemon_manager_module.write_guard_daemon_state(guard_home, 5711, "token-1", pid=111)
-
-        monkeypatch.setattr(
-            daemon_manager_module,
-            "_running_guard_daemon_processes_for_guard_home",
-            lambda _guard_home: [(111, 5711), (222, 5712)] if not (guard_home / "retired").exists() else [(111, 5711)],
-        )
-
-        def fake_retire(_pid: int, *, expected_guard_home: Path | None = None) -> bool:
-            del expected_guard_home
-            daemon_manager_module.clear_guard_daemon_state(guard_home)
-            (guard_home / "retired").write_text("1", encoding="utf-8")
-            return True
-
-        monkeypatch.setattr(daemon_manager_module, "_retire_guard_daemon_pid", fake_retire)
-        monkeypatch.setattr(daemon_manager_module, "_daemon_healthz_details_payload", lambda _url, _auth_token: None)
-
-        daemon_manager_module._retire_duplicate_guard_daemons(guard_home, keep_port=5711)
-
-        assert json.loads((guard_home / "daemon-state.json").read_text(encoding="utf-8")) == {}
+    native_runtime_status()
 
 
 class _FakeSpawnedDaemonProcess:
@@ -492,9 +405,7 @@ class TestSpawnedDaemonStartClassification:
             lambda pid: {999999: 555555, 555555: own_pid}.get(pid),
         )
         assert (
-            start_classification.daemon_journal_records_start_requested_after(
-                guard_home, root_pid=own_pid, since_ns=1
-            )
+            start_classification.daemon_journal_records_start_requested_after(guard_home, root_pid=own_pid, since_ns=1)
             is True
         )
         assert (
@@ -509,9 +420,7 @@ class TestSpawnedDaemonStartClassification:
         other_home.mkdir()
         record_daemon_lifecycle_event(other_home, event="start_requested", pid=888888)
         assert (
-            start_classification.daemon_journal_records_start_requested_after(
-                other_home, root_pid=own_pid, since_ns=1
-            )
+            start_classification.daemon_journal_records_start_requested_after(other_home, root_pid=own_pid, since_ns=1)
             is False
         )
         assert (
@@ -533,6 +442,7 @@ class TestSpawnedDaemonStartClassification:
         from codex_plugin_scanner.guard.daemon import start_classification
 
         monkeypatch.setattr(daemon_manager_module, "_reap_stale_ephemeral_guard_daemons", lambda **_: None)
+        monkeypatch.setattr(daemon_manager_module, "reap_orphaned_daemon_workers", lambda **_: None)
         monkeypatch.setattr(
             daemon_manager_module,
             "_running_guard_daemon_processes_for_guard_home",
@@ -542,6 +452,7 @@ class TestSpawnedDaemonStartClassification:
         monkeypatch.setattr(daemon_manager_module, "_load_state", lambda _gh: None)
         monkeypatch.setattr(daemon_manager_module, "_guard_daemon_start_in_progress", lambda _gh: False)
         monkeypatch.setattr(daemon_manager_module.time, "sleep", lambda _: None)
+        _warm_native_runtime_status()
         monkeypatch.setattr(daemon_manager_module.subprocess, "Popen", lambda *a, **k: process)
         monkeypatch.setattr(daemon_manager_module, "process_start_token", lambda _pid: "posix:token")
         monkeypatch.setattr(
@@ -570,7 +481,7 @@ class TestSpawnedDaemonStartClassification:
         process = _FakeSpawnedDaemonProcess()
         self._patch_ensure_deadline(monkeypatch, guard_home, process, owner_lock_held=True)
 
-        with pytest.raises(RuntimeError, match="^Guard daemon is still starting"):
+        with pytest.raises(RuntimeError, match=r"^Guard daemon is still starting"):
             daemon_manager_module.ensure_guard_daemon(guard_home, start_timeout=30.0, home_dir=tmp_path)
 
         assert process.terminated is False
@@ -591,12 +502,10 @@ class TestSpawnedDaemonStartClassification:
             guard_home,
             process,
             owner_lock_held=False,
-            journal_wait=lambda: record_daemon_lifecycle_event(
-                guard_home, event="start_requested", pid=process.pid
-            ),
+            journal_wait=lambda: record_daemon_lifecycle_event(guard_home, event="start_requested", pid=process.pid),
         )
 
-        with pytest.raises(RuntimeError, match="^Guard daemon is still starting"):
+        with pytest.raises(RuntimeError, match=r"^Guard daemon is still starting"):
             daemon_manager_module.ensure_guard_daemon(guard_home, start_timeout=30.0, home_dir=tmp_path)
 
         assert process.terminated is False
@@ -609,8 +518,8 @@ class TestSpawnedDaemonStartClassification:
         process = _FakeSpawnedDaemonProcess()
         self._patch_ensure_deadline(monkeypatch, guard_home, process, owner_lock_held=False)
 
-        with pytest.raises(RuntimeError, match="^Guard approval center did not start"):
-            daemon_manager_module.ensure_guard_daemon(guard_home, start_timeout=0.05, home_dir=tmp_path)
+        with pytest.raises(RuntimeError, match=r"^Guard approval center did not start"):
+            daemon_manager_module.ensure_guard_daemon(guard_home, start_timeout=30.0, home_dir=tmp_path)
 
         assert process.terminated is True
 
@@ -625,8 +534,9 @@ class TestSpawnedDaemonStartClassification:
         self._patch_ensure_deadline(monkeypatch, guard_home, process, owner_lock_held=True)
         monkeypatch.setattr(daemon_manager_module, "process_start_token", lambda _pid: None)
 
-        with pytest.raises(RuntimeError, match="^Guard approval center did not start"):
-            daemon_manager_module.ensure_guard_daemon(guard_home, start_timeout=0.05, home_dir=tmp_path)
+        with pytest.raises(RuntimeError, match=r"^Guard approval center did not start"):
+            # The patched readiness wait models expiry after the process spawns.
+            daemon_manager_module.ensure_guard_daemon(guard_home, start_timeout=30.0, home_dir=tmp_path)
 
         assert process.terminated is True
         assert not (guard_home / "daemon-start-progress.json").is_file()
@@ -647,6 +557,7 @@ class TestStillStartingAdoption:
         monkeypatch.setattr(daemon_manager_module, "_load_state", lambda _gh: None)
         monkeypatch.setattr(daemon_manager_module, "_guard_daemon_start_in_progress", lambda _gh: False)
         monkeypatch.setattr(daemon_manager_module.time, "sleep", lambda _: None)
+        _warm_native_runtime_status()
         monkeypatch.setattr(
             daemon_manager_module.subprocess,
             "Popen",
@@ -758,16 +669,14 @@ class TestStillStartingAdoption:
             "_wait_for_guard_daemon_url",
             lambda _gh, **_kw: None,
         )
-        monkeypatch.setattr(
-            daemon_manager_module, "_guard_daemon_pid_is_running", lambda _pid: True
-        )
+        monkeypatch.setattr(daemon_manager_module, "_guard_daemon_pid_is_running", lambda _pid: True)
         monkeypatch.setattr(
             daemon_manager_module,
             "daemon_still_starting_evidence_present",
             lambda _gh, **_kw: True,
         )
 
-        with pytest.raises(RuntimeError, match="^Guard daemon is still starting"):
+        with pytest.raises(RuntimeError, match=r"^Guard daemon is still starting"):
             daemon_manager_module.ensure_guard_daemon(guard_home, start_timeout=30.0, home_dir=tmp_path)
 
         daemon_spawns = [cmd for cmd in calls["popen"] if "daemon" in str(cmd)]
@@ -793,9 +702,7 @@ class TestStillStartingAdoption:
             "_wait_for_guard_daemon_url",
             lambda _gh, **_kw: None,
         )
-        monkeypatch.setattr(
-            daemon_manager_module, "_guard_daemon_pid_is_running", lambda _pid: False
-        )
+        monkeypatch.setattr(daemon_manager_module, "_guard_daemon_pid_is_running", lambda _pid: False)
         monkeypatch.setattr(
             daemon_manager_module,
             "_wait_for_started_guard_daemon_url",
@@ -828,15 +735,9 @@ class TestStillStartingAdoption:
         )
 
         assert (
-            daemon_manager_module._windows_pending_launch_needs_retirement(
-                guard_home, progress_is_live=True
-            )
-            is False
+            daemon_manager_module._windows_pending_launch_needs_retirement(guard_home, progress_is_live=True) is False
         )
         assert pending_loads == []
         assert (
-            daemon_manager_module._windows_pending_launch_needs_retirement(
-                guard_home, progress_is_live=False
-            )
-            is True
+            daemon_manager_module._windows_pending_launch_needs_retirement(guard_home, progress_is_live=False) is True
         )

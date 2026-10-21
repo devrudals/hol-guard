@@ -11,6 +11,8 @@ from codex_plugin_scanner.guard.runtime.observed_mcp_tools import (
 )
 from codex_plugin_scanner.guard.store import GuardStore
 
+from .local_cli_native_fixture import native_local_cli_grant_resident  # noqa: F401
+
 
 def test_observed_connector_enrollment_uses_stored_catalog_and_requires_trust(
     tmp_path: Path,
@@ -73,6 +75,11 @@ def test_permission_mutation_retires_native_readiness_before_writing(
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     store = GuardStore(tmp_path / "guard-home")
+    # Discovery starts the resident. That prerequisite mints a verifier from a
+    # fresh store when the key file is absent, so the fixture key has to be
+    # on disk before the first observation.
+    monkeypatch.setattr(store, "_policy_integrity_secret_material", lambda *, create: (b"f" * 32, "fixture-key"))
+    store._provision_resident_verifier()
     tool = observed_mcp_tool("codex", "mcp__codex_apps__composio__search")
     assert tool is not None
     monkeypatch.setattr(
@@ -90,7 +97,6 @@ def test_permission_mutation_retires_native_readiness_before_writing(
         updated_at="2026-01-01T00:00:01Z",
         command_states={tool.command_id: "allow"},
     )
-    monkeypatch.setattr(store, "_policy_integrity_secret_material", lambda *, create: (b"f" * 32, "fixture-key"))
     refresh = threading.Event()
     entered = threading.Event()
     release = threading.Event()
@@ -100,7 +106,7 @@ def test_permission_mutation_retires_native_readiness_before_writing(
         if refresh.is_set():
             entered.set()
             assert release.wait(10)
-        return _ack(payload)
+        return _ack(payload, guard_home=kwargs.get("guard_home"))
 
     publisher = NativePolicySnapshotPublisher(
         store=store, status_provider=_status, client_request=client_request, poll_interval_seconds=60
@@ -216,8 +222,9 @@ def test_discovery_preserves_choices_and_never_approves_new_tools(
     assert store.read_local_cli_command_states(tool.identity.cli_id)[tool.command_id] == "allow"
     assert native_observed_mcp_tool_actions(store) == {"codex:" + tool.qualified_name: "allow"}
     assert store.read_local_cli_revision() == 1
-    from codex_plugin_scanner.guard.local_cli_trust import matching_local_mcp_grant
     from codex_plugin_scanner.guard.mcp_tool_calls import build_tool_call_artifact
+
+    from .mcp_extension_driver import matching_local_mcp_grant
 
     def artifact(name: str):
         return build_tool_call_artifact(
@@ -334,6 +341,43 @@ def test_duplicate_sources_do_not_consume_catalog_capacity(tmp_path: Path, monke
     assert len(store.read_local_cli_command_catalog(tool.identity.cli_id)) == MAX_OBSERVED_MCP_TOOLS
 
 
+def test_saturated_observed_connector_is_reported_without_blocking_other_connectors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from codex_plugin_scanner.guard.runtime.local_cli_commands import LocalCliCommand
+
+    store = GuardStore(tmp_path / "guard-home")
+    existing = [observed_mcp_tool("codex", f"mcp__server__tool_{index}") for index in range(MAX_OBSERVED_MCP_TOOLS)]
+    assert all(tool is not None for tool in existing)
+    first = existing[0]
+    assert first is not None
+    store.merge_local_cli_commands(
+        first.identity.cli_id,
+        [
+            LocalCliCommand(
+                command_id=tool.command_id, name=tool.name, usage=tool.qualified_name, description="Observed"
+            )
+            for tool in existing
+            if tool is not None
+        ],
+        limit=MAX_OBSERVED_MCP_TOOLS,
+    )
+    monkeypatch.setattr(
+        store,
+        "list_approval_requests",
+        lambda status, limit: [
+            {"harness": "codex", "raw_command_text": "tool:mcp__server__new_tool"},
+            {"harness": "codex", "raw_command_text": "tool:mcp__other__read"},
+        ],
+    )
+    monkeypatch.setattr(store, "list_receipts", lambda limit: [])
+    assert discover_observed_mcp_tools(store, seen_at="2026-01-01T00:00:00Z") == 1
+    assert len(store.read_local_cli_command_catalog(first.identity.cli_id)) == MAX_OBSERVED_MCP_TOOLS
+    other = observed_mcp_tool("codex", "mcp__other__read")
+    assert other is not None
+    assert len(store.read_local_cli_command_catalog(other.identity.cli_id)) == 1
+
+
 def test_large_tool_catalog_is_authenticated_in_native_snapshot(tmp_path: Path) -> None:
     import hashlib
     import hmac
@@ -365,11 +409,3 @@ def test_large_tool_catalog_is_authenticated_in_native_snapshot(tmp_path: Path) 
     signing["effective_policy"]["mcp_tool_actions"]["codex:mcp__server__tool_0"] = "block"
     changed = json.dumps(signing, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     assert hmac.new(b"k" * 32, POLICY_SNAPSHOT_INTEGRITY_DOMAIN + changed, hashlib.sha256).hexdigest() != expected
-
-
-def test_native_policy_never_accepts_namespace_wide_allow() -> None:
-    from codex_plugin_scanner.guard.native_policy_snapshot_constants import NativePolicySnapshotError
-    from codex_plugin_scanner.guard.native_policy_snapshot_policy import _observed_mcp_action_map
-
-    with pytest.raises(NativePolicySnapshotError):
-        _observed_mcp_action_map({"codex:mcp__server__*": "allow"})

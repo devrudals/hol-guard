@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useId, useRef } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ChangeEvent, KeyboardEvent, RefObject } from "react";
 import { HiMiniKey } from "react-icons/hi2";
 import { ActionButton } from "./approval-center-primitives";
+import { shouldSubmitApprovalProof } from "./approval-keyboard";
 import type { GuardApprovalGatePublicConfig } from "./guard-types";
 import { isBulkApproveGateReady as approvalGateProofReady } from "./queue-bulk-approval-credentials";
+import { approvalGateIsLocked, approvalGateLockRemainingSeconds } from "./approval-gate-utils";
 export { approvalGateProofReady };
 
 type ApprovalProofFieldInputsProps = {
@@ -26,6 +28,25 @@ export function approvalProofRequiresPassword(gate: GuardApprovalGatePublicConfi
 }
 
 
+
+export function approvalGateNeedsSetup(gate: GuardApprovalGatePublicConfig | null | undefined): boolean {
+  return gate !== null && gate !== undefined && gate.enabled !== true;
+}
+
+export function ApprovalGateRecommendationNotice() {
+  return (
+    <div
+      role="note"
+      className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-brand-blue/20 bg-brand-blue/[0.04] px-4 py-3"
+    >
+      <HiMiniKey className="h-4 w-4 shrink-0 text-brand-blue" aria-hidden="true" />
+      <p className="min-w-0 flex-1 text-sm text-slate-600">
+        Set an approval password or MFA so only you can approve blocked actions.
+      </p>
+      <ActionButton href="/settings?section=approval" variant="outline">Set up approval</ActionButton>
+    </div>
+  );
+}
 
 export function ApprovalGateSetupNotice() {
   return (
@@ -58,6 +79,9 @@ export function isApprovalProofSubmitDisabled(
   if (busy) {
     return true;
   }
+  if (approvalGateIsLocked(gate)) {
+    return true;
+  }
   if (requireGate && gate == null) {
     return true;
   }
@@ -80,6 +104,9 @@ export function buildApprovalProofCredentials(
   credentials: { approvalPassword: string; approvalTotpCode: string },
   requireFreshTotp = false,
 ): { approval_password?: string; approval_totp_code?: string } {
+  if (approvalGateIsLocked(gate)) {
+    return {};
+  }
   if (gate != null && !approvalGateProofReady(gate)) {
     return {};
   }
@@ -176,6 +203,15 @@ type ApprovalProofInlineProps = {
 
 export function ApprovalProofInline(props: ApprovalProofInlineProps) {
   const passwordRef = useRef<HTMLInputElement>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const lockRemainingSeconds = approvalGateLockRemainingSeconds(props.approvalGate, now);
+  const gateLocked = lockRemainingSeconds > 0;
+
+  useEffect(() => {
+    if (!gateLocked) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [gateLocked]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -195,7 +231,7 @@ export function ApprovalProofInline(props: ApprovalProofInlineProps) {
 
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
-      if (event.key === "Enter" && !submitDisabled) {
+      if (shouldSubmitApprovalProof(event.key, event.nativeEvent.isComposing, submitDisabled)) {
         event.preventDefault();
         props.onSubmit();
       }
