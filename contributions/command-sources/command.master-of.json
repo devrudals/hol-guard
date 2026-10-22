@@ -7,7 +7,7 @@
     "conflicts": [],
     "delegated_protection": null,
     "dependencies": [],
-    "description": "Reviews bulk mutation commands from the master-of (mo) CLI \u2014 parking every unparked skill, confirming every pending classification, regenerating AGY gate skills, and toggling Cowork packs \u2014 before they run. Diagnostic and inspection commands (mo doctor, mo status/check, mo full, mo search) are not matched by this extension and stay unreviewed.",
+    "description": "Reviews bulk mutation commands from the master-of (mo) CLI — parking every unparked skill, confirming every pending classification, regenerating AGY gate skills, and toggling Cowork packs — before they run. Diagnostic and inspection commands (mo doctor, mo status/check, mo full, mo search) are not matched by this extension; Guard's default review floor still applies to them.",
     "ecosystem_ids": [],
     "executables": [],
     "extension_id": "command.master-of",
