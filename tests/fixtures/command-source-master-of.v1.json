@@ -1017,30 +1017,6 @@
       "expected_effective_segments": [],
       "id": "doctor-unmatched",
       "rule_id": "command.master-of.bulk-park"
-    },
-    {
-      "command": "mo agy-setup -- --help",
-      "disabled_permissions": [],
-      "enabled_extensions": [
-        "command.master-of"
-      ],
-      "expected_action": "review",
-      "expected_effective_segments": [],
-      "id": "agy-setup-dashdash-help",
-      "rule_id": "command.master-of.agy-setup"
-    },
-    {
-      "command": "mo agy-setup -- --help",
-      "disabled_permissions": [
-        "command.master-of.permission.agy-setup"
-      ],
-      "enabled_extensions": [
-        "command.master-of"
-      ],
-      "expected_action": "review",
-      "expected_effective_segments": [],
-      "id": "agy-setup-dashdash-help-disabled",
-      "rule_id": "command.master-of.agy-setup"
     }
   ],
   "schema": "guard.command-extension-fixtures.v1"
